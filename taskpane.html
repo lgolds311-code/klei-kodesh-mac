@@ -161,7 +161,7 @@
     <!-- ===== דיקטא וניקוד ===== -->
     <div class="panel" id="panel-dicta">
       <div class="card">
-        <p class="hint">סמן טקסט במסמך ולחץ "נקד את הבחירה". הטקסט יישלח לשרת הניקוד של דיקטא והניקוד יוחזר ישירות למסמך.<br><small style="opacity:.6">גרסה 4 — שומר הערות שוליים/סיום וכתב מודגש</small></p>
+        <p class="hint">סמן טקסט במסמך ולחץ "נקד את הבחירה". הטקסט יישלח לשרת הניקוד של דיקטא והניקוד יוחזר ישירות למסמך.<br><small style="opacity:.6">גרסה 5 — שומר הערות/מודגש + תיקון ניקוד למילה</small></p>
         <div class="opts">
           <label><input type="radio" name="genre" value="modern" /> עברית מודרנית</label>
           <label><input type="radio" name="genre" value="rabbinic" checked /> לשון חז"ל / רבנית</label>
@@ -170,6 +170,14 @@
           <button class="action" id="btnNakdan">נקד את הבחירה</button>
         </div>
         <div class="status" id="dictaStatus"></div>
+      </div>
+      <div class="card">
+        <p class="hint">תיקון ניקוד: בחר מילה במסמך וקבל אפשרויות ניקוד חלופיות (כמו בדיקטא). לחיצה על אפשרות מחליפה את המילה במסמך — תוך שמירת עיצוב והערות.</p>
+        <div class="btns">
+          <button class="action" id="btnFixWord">אפשרויות למילה הנבחרת</button>
+        </div>
+        <label style="display:block;margin-top:8px;"><input type="checkbox" id="optFixAuto" /> הצג אפשרויות אוטומטית בעת בחירת מילה</label>
+        <div id="fixOptions" class="sites" style="margin-top:8px;"></div>
       </div>
       <div class="card">
         <p class="hint">פתיחת כלי דיקטא המלאים בחלון בתוך וורד:</p>
@@ -444,7 +452,9 @@
       for (let i = 0; i < matches.length; i++) {
         const mm = matches[i];
         const orig = khXmlUnescape(mm[2]);
-        let slice = take(orig.length);
+        let baseLen = 0;
+        for (const ch of orig) { if (!khIsHebMark(ch.charCodeAt(0))) baseLen++; }
+        let slice = take(baseLen);
         if (i === matches.length - 1 && pos < N.length) slice += N.slice(pos);
         result += ooxml.slice(last, mm.index) + mm[1] + khXmlEscape(slice) + mm[3];
         last = mm.index + mm[0].length;
@@ -452,6 +462,106 @@
       result += ooxml.slice(last);
       return result;
     }
+
+        // ===== תיקון ניקוד: אפשרויות חלופיות לכל מילה (כמו בדיקטא) =====
+    function cleanNiqqudWord(s) {
+      s = (s || "").replace(/\|/g, "");
+      s = s.replace(/([א-ת][֑-ׇ]*)"(?=[֑-ׇ]*[א-ת])/g, "$1״");
+      s = s.replace(/([א-ת][֑-ׇ]*)'/g, "$1׳");
+      return s;
+    }
+    async function callDictaWordOptions(word, genre) {
+      const resp = await fetch("https://nakdan-5-1.loadbalancer.dicta.org.il/api", {
+        method: "POST",
+        headers: { "Content-Type": "text/plain;charset=UTF-8" },
+        body: JSON.stringify({ task: "nakdan", data: word, genre: genre, addmorph: true, keepqq: false, nodageshdefmem: false, patachma: false, keepmetagim: true })
+      });
+      if (!resp.ok) throw new Error("HTTP " + resp.status);
+      const data = await resp.json();
+      const tok = data.find(function (d) { return d.options && d.options.length; });
+      if (!tok) return [];
+      const seen = {}, out = [];
+      tok.options.forEach(function (o) {
+        const raw = Array.isArray(o) ? o[0] : (typeof o === "string" ? o : (o && (o.w || o.word)) || "");
+        const cand = cleanNiqqudWord(raw);
+        if (cand && !seen[cand]) { seen[cand] = 1; out.push(cand); }
+      });
+      return out;
+    }
+    // החלפת הבחירה הנוכחית בניקוד נתון, תוך שמירת עיצוב (OOXML)
+    async function replaceSelectionWithNiqqud(niqqud) {
+      await Word.run(async function (context) {
+        const sel = context.document.getSelection();
+        const ox = sel.getOoxml();
+        await context.sync();
+        let newXml = null;
+        try { newXml = redistributeNiqqud(ox.value, niqqud); } catch (_) { newXml = null; }
+        if (newXml) sel.insertOoxml(newXml, Word.InsertLocation.replace);
+        else sel.insertText(niqqud, Word.InsertLocation.replace);
+        await context.sync();
+      });
+    }
+    function renderFixOptions(word, options) {
+      const box = document.getElementById("fixOptions");
+      if (!box) return;
+      box.innerHTML = "";
+      if (!options.length) { box.innerHTML = '<div class="hint">אין אפשרויות למילה זו.</div>'; return; }
+      const title = document.createElement("div");
+      title.className = "hint";
+      title.textContent = 'אפשרויות ל-"' + word + '" — לחץ כדי להחליף:';
+      box.appendChild(title);
+      options.forEach(function (opt) {
+        const b = document.createElement("button");
+        b.className = "site-btn";
+        b.style.fontSize = "17px";
+        b.textContent = opt;
+        b.addEventListener("click", async function () {
+          try {
+            setStatus("dictaStatus", "מחליף…", "");
+            await replaceSelectionWithNiqqud(opt);
+            setStatus("dictaStatus", "הניקוד עודכן ✓", "ok");
+          } catch (e) { setStatus("dictaStatus", "שגיאה בהחלפה: " + e.message, "err"); }
+        });
+        box.appendChild(b);
+      });
+    }
+    async function showFixOptionsForSelection() {
+      const genreEl = document.querySelector('input[name="genre"]:checked');
+      const genre = genreEl ? genreEl.value : "rabbinic";
+      let word = "";
+      try { word = (await getSelectedText() || "").trim(); } catch (_) {}
+      const box = document.getElementById("fixOptions");
+      if (!word || /\s/.test(word) || !/[א-ת]/.test(word) || word.length > 25) {
+        if (box) box.innerHTML = '<div class="hint">בחר מילה אחת במסמך.</div>';
+        return;
+      }
+      try {
+        const opts = await callDictaWordOptions(word, genre);
+        renderFixOptions(word, opts);
+      } catch (e) {
+        if (box) box.innerHTML = '<div class="hint">שגיאה: ' + e.message + '</div>';
+      }
+    }
+    let fixSelHandlerOn = false, fixDebounce = null;
+    function fixSelectionChanged() {
+      if (fixDebounce) clearTimeout(fixDebounce);
+      fixDebounce = setTimeout(showFixOptionsForSelection, 350);
+    }
+    (function () {
+      const manual = document.getElementById("btnFixWord");
+      if (manual) manual.addEventListener("click", showFixOptionsForSelection);
+      const auto = document.getElementById("optFixAuto");
+      if (auto) auto.addEventListener("change", function () {
+        if (!officeReady || !Office.context || !Office.context.document) { return; }
+        if (auto.checked && !fixSelHandlerOn) {
+          Office.context.document.addHandlerAsync(Office.EventType.DocumentSelectionChanged, fixSelectionChanged);
+          fixSelHandlerOn = true;
+        } else if (!auto.checked && fixSelHandlerOn) {
+          Office.context.document.removeHandlerAsync(Office.EventType.DocumentSelectionChanged, { handler: fixSelectionChanged });
+          fixSelHandlerOn = false;
+        }
+      });
+    })();
 
     async function callDictaNakdan(text, genre) {
       const resp = await fetch("https://nakdan-5-1.loadbalancer.dicta.org.il/api", {
