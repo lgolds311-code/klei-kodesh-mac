@@ -161,7 +161,7 @@
     <!-- ===== דיקטא וניקוד ===== -->
     <div class="panel" id="panel-dicta">
       <div class="card">
-        <p class="hint">סמן טקסט במסמך ולחץ "נקד את הבחירה". הטקסט יישלח לשרת הניקוד של דיקטא והניקוד יוחזר ישירות למסמך.<br><small style="opacity:.6">גרסה 6 — שומר הערות/מודגש + תיקון ניקוד למילה</small></p>
+        <p class="hint">סמן טקסט במסמך ולחץ "נקד את הבחירה". הטקסט יישלח לשרת הניקוד של דיקטא והניקוד יוחזר ישירות למסמך.<br><small style="opacity:.6">גרסה 7 — שומר הערות/מודגש + תיקון ניקוד למילה</small></p>
         <div class="opts">
           <label><input type="radio" name="genre" value="modern" /> עברית מודרנית</label>
           <label><input type="radio" name="genre" value="rabbinic" checked /> לשון חז"ל / רבנית</label>
@@ -489,16 +489,23 @@
       return out;
     }
     // החלפת הבחירה הנוכחית בניקוד נתון, תוך שמירת עיצוב (OOXML)
+    // טקסט הבחירה מתוך ה-OOXML (מקור אמין לרווחים/פיסוק בקצוות)
+    function ooxmlText(ooxml) {
+      let out = "";
+      const re = /<w:t\b[^>]*>([\s\S]*?)<\/w:t>/g;
+      let m;
+      while ((m = re.exec(ooxml))) out += khXmlUnescape(m[1]);
+      return out;
+    }
     async function replaceSelectionWithNiqqud(niqqud) {
       await Word.run(async function (context) {
         const sel = context.document.getSelection();
-        sel.load("text");
         const ox = sel.getOoxml();
         await context.sync();
         // שמירת תווים שאינם אותיות בקצוות הבחירה (רווח/פיסוק) כפי שסומנו
-        const selText = sel.text || "";
-        const lead = (selText.match(/^[^\u05D0-\u05EA]*/) || [""])[0];
-        const trail = (selText.match(/[^\u05D0-\u05EA]*$/) || [""])[0];
+        const oxText = ooxmlText(ox.value);
+        const lead = (oxText.match(/^[^\u05D0-\u05EA]*/) || [""])[0];
+        const trail = (oxText.match(/[^\u05D0-\u05EA]*$/) || [""])[0];
         const full = lead + niqqud + trail;
         let newXml = null;
         try { newXml = redistributeNiqqud(ox.value, full); } catch (_) { newXml = null; }
