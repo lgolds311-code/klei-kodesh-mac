@@ -161,7 +161,7 @@
     <!-- ===== דיקטא וניקוד ===== -->
     <div class="panel" id="panel-dicta">
       <div class="card">
-        <p class="hint">סמן טקסט במסמך ולחץ "נקד את הבחירה". הטקסט יישלח לשרת הניקוד של דיקטא והניקוד יוחזר ישירות למסמך.<br><small style="opacity:.6">גרסה 3 — שומר הערות שוליים/סיום וכתב מודגש</small></p>
+        <p class="hint">סמן טקסט במסמך ולחץ "נקד את הבחירה". הטקסט יישלח לשרת הניקוד של דיקטא והניקוד יוחזר ישירות למסמך.<br><small style="opacity:.6">גרסה 4 — שומר הערות שוליים/סיום וכתב מודגש</small></p>
         <div class="opts">
           <label><input type="radio" name="genre" value="modern" /> עברית מודרנית</label>
           <label><input type="radio" name="genre" value="rabbinic" checked /> לשון חז"ל / רבנית</label>
@@ -323,64 +323,7 @@
           const sel = context.document.getSelection();
 
           // ----- ניקוד קטע יחיד (נטול-הערות) תוך שמירה על עיצוב מקומי כמו כתב מודגש -----
-          async function nikudWordwise(target) {
-            const wr = target.getTextRanges([" "], true);
-            wr.load("items");
-            await context.sync();
-            const words = wr.items || [];
-            if (!words.length) return;
-            words.forEach(function (w) { w.load("text,font/bold,font/italic,font/underline"); });
-            await context.sync();
-            // צילום טקסט + עיצוב לכל מילה (ערכים קונקרטיים, לפני כל עריכה)
-            const texts = [], fonts = [];
-            words.forEach(function (w) {
-              texts.push(w.text || "");
-              fonts.push({ b: w.font.bold, i: w.font.italic, u: w.font.underline });
-            });
-            // ניקוד מאוחד לקבלת הקשר טוב; אם החלוקה למילים תואמת – משתמשים בו
-            let tokens = null;
-            const joint = await callDictaNakdan(texts.join(" "), genre);
-            const jt = joint.split(" ").filter(function (t) { return t.length; });
-            if (jt.length === words.length) tokens = jt;
-            // החלה מהסוף להתחלה כדי שמיקומי המילים הקודמות לא יזוזו
-            for (let i = words.length - 1; i >= 0; i--) {
-              if (!texts[i].trim()) continue;
-              const niq = tokens ? tokens[i] : await callDictaNakdan(texts[i], genre);
-              const w = words[i];
-              w.insertText(niq, Word.InsertLocation.replace);
-              try {
-                w.font.bold = fonts[i].b;
-                w.font.italic = fonts[i].i;
-                w.font.underline = fonts[i].u;
-              } catch (_) { /* mixed format in word - skip */ }
-              await context.sync();
-            }
-          }
-
-          async function nikudSegment(seg) {
-            seg.load("text");
-            await context.sync();
-            const src = seg.text || "";
-            if (!src.trim()) return;
-            // פסקה אחת – ישר למסלול מילה-מילה
-            if (!/[\r\n\f\v]/.test(src)) {
-              await nikudWordwise(seg);
-              return;
-            }
-            // ריבוי פסקאות – פסקה-פסקה, כל חלק תחום בתוך הקטע כדי לא לחצות הערות
-            const paras = seg.paragraphs;
-            paras.load("items");
-            await context.sync();
-            const items = paras.items || [];
-            for (let p = items.length - 1; p >= 0; p--) {
-              let pr;
-              try { pr = items[p].getRange(Word.RangeLocation.content).intersectWith(seg); }
-              catch (_) { continue; }
-              await nikudWordwise(pr);
-            }
-          }
-
-          // ----- איסוף סימני ההפניה של הערות שוליים + הערות סיום שבתוך הבחירה -----
+                    // ----- איסוף סימני ההפניה: הערות שוליים + הערות סיום שבתוך הבחירה -----
           let footRefs = [], endRefs = [];
           try {
             const fns = sel.footnotes; fns.load("items");
@@ -394,7 +337,7 @@
             (ens.items || []).forEach(function (n) { endRefs.push(n.reference); });
           } catch (e2) { /* אין תמיכה בהערות סיום בגרסת ה-API – ממשיכים */ }
 
-          // מיזוג שתי הרשימות (כל אחת בסדר מסמך) לרשימה ממויינת אחת לפי מיקום
+          // מיזוג שתי הרשימות לפי מיקום במסמך
           const noteRefs = [];
           let fi = 0, ei = 0;
           while (fi < footRefs.length && ei < endRefs.length) {
@@ -408,27 +351,50 @@
           while (ei < endRefs.length) noteRefs.push(endRefs[ei++]);
           noteCount = noteRefs.length;
 
-          // אין הערות – מנקדים את כל הבחירה כקטע אחד
-          if (!noteRefs.length) {
-            await nikudSegment(sel);
-            return;
-          }
-
-          // בניית קטעי טקסט שבין סימני ההפניה (הסימנים עצמם לעולם לא בתוך קטע)
-          const selStart = sel.getRange(Word.RangeLocation.start);
-          const selEnd = sel.getRange(Word.RangeLocation.end);
+          // בניית קטעים נטולי-הערות. ללא הערות – הבחירה כולה קטע אחד (החלפה אחת => Undo בודד).
           const segs = [];
-          segs.push(selStart.expandTo(noteRefs[0].getRange(Word.RangeLocation.start)));
-          for (let k = 0; k < noteRefs.length - 1; k++) {
-            segs.push(noteRefs[k].getRange(Word.RangeLocation.end)
-                        .expandTo(noteRefs[k + 1].getRange(Word.RangeLocation.start)));
+          if (!noteRefs.length) {
+            segs.push(sel);
+          } else {
+            const selStart = sel.getRange(Word.RangeLocation.start);
+            const selEnd = sel.getRange(Word.RangeLocation.end);
+            segs.push(selStart.expandTo(noteRefs[0].getRange(Word.RangeLocation.start)));
+            for (let k = 0; k < noteRefs.length - 1; k++) {
+              segs.push(noteRefs[k].getRange(Word.RangeLocation.end)
+                          .expandTo(noteRefs[k + 1].getRange(Word.RangeLocation.start)));
+            }
+            segs.push(noteRefs[noteRefs.length - 1].getRange(Word.RangeLocation.end).expandTo(selEnd));
           }
-          segs.push(noteRefs[noteRefs.length - 1].getRange(Word.RangeLocation.end).expandTo(selEnd));
 
-          // עיבוד מהסוף להתחלה, כדי שמיקומי הקטעים הקודמים לא יזוזו עקב העריכה
-          for (let s = segs.length - 1; s >= 0; s--) {
-            await nikudSegment(segs[s]);
+          // שלב 1: שליפת OOXML + טקסט לכל קטע (סנכרון אחד)
+          const oox = [];
+          segs.forEach(function (s) { s.load("text"); oox.push(s.getOoxml()); });
+          await context.sync();
+
+          // שלב 2: ניקוד כל קטע, והזרקת הניקוד לתוך ה-OOXML (שומר עיצוב; ההערות מחוץ לקטע)
+          const apply = [];
+          for (let i = 0; i < segs.length; i++) {
+            const src = segs[i].text || "";
+            if (!src.trim()) { apply.push(null); continue; }
+            const niqqud = await callDictaNakdan(src, genre);
+            let newXml = null;
+            try { newXml = redistributeNiqqud(oox[i].value, niqqud); } catch (_) { newXml = null; }
+            apply.push({ niqqud: niqqud, xml: newXml });
           }
+
+          // שלב 3: החלפה אחת לכל קטע (מהסוף להתחלה), ואז סנכרון יחיד => מהיר ו-Undo מועט
+          for (let i = segs.length - 1; i >= 0; i--) {
+            const a = apply[i];
+            if (!a) continue;
+            if (a.xml) {
+              segs[i].insertOoxml(a.xml, Word.InsertLocation.replace);
+            } else {
+              // גיבוי אם פירוק ה-OOXML נכשל: החלפת טקסט פשוטה, ואיפוס הדגשה כדי שלא "תימרח"
+              segs[i].insertText(a.niqqud, Word.InsertLocation.replace);
+              try { segs[i].font.bold = false; } catch (_) {}
+            }
+          }
+          await context.sync();
         });
         setStatus("dictaStatus", "הניקוד הוחזר למסמך ✓ (נשמרו " + noteCount + " הערות)", "ok");
       } catch (e) {
@@ -441,6 +407,52 @@
     });
 
     // קריאה ל-API של דיקטא. אם המבנה ישתנה בעתיד – הגיבוי הוא פתיחת נקדן פרו בחלון.
+        // ===== הזרקת ניקוד לתוך OOXML תוך שמירה על מבנה ה-runs (עיצוב) וההערות =====
+    // דיקטא רק *מוסיף* סימני ניקוד לאותן אותיות; לכן כל תו-בסיס ב-OOXML מקבל את
+    // הניקוד שלו, ומבנה ה-runs (מודגש/נטוי) ואלמנטי ההפניה נשארים כפי שהם.
+    function khIsHebMark(code) {
+      return (code >= 0x0591 && code <= 0x05BD) || code === 0x05BF ||
+             code === 0x05C1 || code === 0x05C2 || code === 0x05C4 ||
+             code === 0x05C5 || code === 0x05C7;
+    }
+    function khXmlUnescape(s) {
+      return s.replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+              .replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&");
+    }
+    function khXmlEscape(s) {
+      return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+    function redistributeNiqqud(ooxml, niqqud) {
+      // סימני שבירת פסקה אינם תווים בתוך <w:t> (הם מבניים) – מסירים אותם מהמחרוזת
+      const N = niqqud.replace(/[\r\n\f\v]/g, "");
+      let pos = 0;
+      function take(n) {
+        let out = "", taken = 0;
+        while (pos < N.length && taken < n) {
+          out += N[pos++];
+          while (pos < N.length && khIsHebMark(N.charCodeAt(pos))) out += N[pos++];
+          taken++;
+        }
+        return out;
+      }
+      const re = /(<w:t\b[^>]*>)([\s\S]*?)(<\/w:t>)/g;
+      const matches = [];
+      let m;
+      while ((m = re.exec(ooxml))) matches.push(m);
+      if (!matches.length) throw new Error("no w:t nodes");
+      let result = "", last = 0;
+      for (let i = 0; i < matches.length; i++) {
+        const mm = matches[i];
+        const orig = khXmlUnescape(mm[2]);
+        let slice = take(orig.length);
+        if (i === matches.length - 1 && pos < N.length) slice += N.slice(pos);
+        result += ooxml.slice(last, mm.index) + mm[1] + khXmlEscape(slice) + mm[3];
+        last = mm.index + mm[0].length;
+      }
+      result += ooxml.slice(last);
+      return result;
+    }
+
     async function callDictaNakdan(text, genre) {
       const resp = await fetch("https://nakdan-5-1.loadbalancer.dicta.org.il/api", {
         method: "POST",
