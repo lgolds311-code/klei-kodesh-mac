@@ -323,32 +323,61 @@
           const sel = context.document.getSelection();
 
           // ----- ניקוד קטע יחיד (נטול-הערות) תוך שמירה על עיצוב מקומי כמו כתב מודגש -----
+          async function nikudWordwise(target) {
+            const wr = target.getTextRanges([" "], true);
+            wr.load("items");
+            await context.sync();
+            const words = wr.items || [];
+            if (!words.length) return;
+            words.forEach(function (w) { w.load("text,font/bold,font/italic,font/underline"); });
+            await context.sync();
+            // צילום טקסט + עיצוב לכל מילה (ערכים קונקרטיים, לפני כל עריכה)
+            const texts = [], fonts = [];
+            words.forEach(function (w) {
+              texts.push(w.text || "");
+              fonts.push({ b: w.font.bold, i: w.font.italic, u: w.font.underline });
+            });
+            // ניקוד מאוחד לקבלת הקשר טוב; אם החלוקה למילים תואמת – משתמשים בו
+            let tokens = null;
+            const joint = await callDictaNakdan(texts.join(" "), genre);
+            const jt = joint.split(" ").filter(function (t) { return t.length; });
+            if (jt.length === words.length) tokens = jt;
+            // החלה מהסוף להתחלה כדי שמיקומי המילים הקודמות לא יזוזו
+            for (let i = words.length - 1; i >= 0; i--) {
+              if (!texts[i].trim()) continue;
+              const niq = tokens ? tokens[i] : await callDictaNakdan(texts[i], genre);
+              const w = words[i];
+              w.insertText(niq, Word.InsertLocation.replace);
+              try {
+                w.font.bold = fonts[i].b;
+                w.font.italic = fonts[i].i;
+                w.font.underline = fonts[i].u;
+              } catch (_) { /* mixed format in word - skip */ }
+              await context.sync();
+            }
+          }
+
           async function nikudSegment(seg) {
             seg.load("text");
             await context.sync();
             const src = seg.text || "";
             if (!src.trim()) return;
-            const niqqud = await callDictaNakdan(src, genre);
-            // קטע בפסקה אחת: מחליפים מילה-מילה כדי לשמר עיצוב מקומי (מודגש/נטוי וכו').
-            // הרווחים וסימני ההפניה יושבים בין המילים ולכן לא נוגעים בהם.
-            if (!/[\r\n\f]/.test(src)) {
-              const wr = seg.getTextRanges([" "], true);
-              wr.load("items");
-              await context.sync();
-              const ranges = wr.items || [];
-              const tokens = niqqud.split(" ").filter(function (t) { return t.length; });
-              if (ranges.length && ranges.length === tokens.length) {
-                for (let i = ranges.length - 1; i >= 0; i--) {
-                  ranges[i].insertText(tokens[i], Word.InsertLocation.replace);
-                }
-                await context.sync();
-                return;
-              }
+            // פסקה אחת – ישר למסלול מילה-מילה
+            if (!/[\r\n\f\v]/.test(src)) {
+              await nikudWordwise(seg);
+              return;
             }
-            // גיבוי: החלפת הקטע כולו. ההערות עדיין מוגנות (הקטע נטול-הערות),
-            // אך בריבוי פסקאות ייתכן איבוד עיצוב מקומי.
-            seg.insertText(niqqud, Word.InsertLocation.replace);
+            // ריבוי פסקאות – פסקה-פסקה, כל חלק תחום בתוך הקטע כדי לא לחצות הערות
+            const paras = seg.paragraphs;
+            paras.load("items");
             await context.sync();
+            const items = paras.items || [];
+            for (let p = items.length - 1; p >= 0; p--) {
+              let pr;
+              try { pr = items[p].getRange(Word.RangeLocation.content).intersectWith(seg); }
+              catch (_) { continue; }
+              await nikudWordwise(pr);
+            }
           }
 
           // ----- איסוף סימני ההפניה של הערות שוליים + הערות סיום שבתוך הבחירה -----
