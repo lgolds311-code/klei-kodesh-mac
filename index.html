@@ -161,7 +161,7 @@
     <!-- ===== דיקטא וניקוד ===== -->
     <div class="panel" id="panel-dicta">
       <div class="card">
-        <p class="hint">סמן טקסט במסמך ולחץ "נקד את הבחירה". הטקסט יישלח לשרת הניקוד של דיקטא והניקוד יוחזר ישירות למסמך.</p>
+        <p class="hint">סמן טקסט במסמך ולחץ "נקד את הבחירה". הטקסט יישלח לשרת הניקוד של דיקטא והניקוד יוחזר ישירות למסמך.<br><small style="opacity:.6">גרסה 2 — שומר הערות שוליים/סיום וכתב מודגש</small></p>
         <div class="opts">
           <label><input type="radio" name="genre" value="modern" /> עברית מודרנית</label>
           <label><input type="radio" name="genre" value="rabbinic" checked /> לשון חז"ל / רבנית</label>
@@ -318,13 +318,90 @@
       const genre = document.querySelector('input[name="genre"]:checked').value;
       setStatus("dictaStatus", "שולח לדיקטא…", "");
       try {
-        const niqqud = await callDictaNakdan(text, genre);
+        let noteCount = 0;
         await Word.run(async (context) => {
           const sel = context.document.getSelection();
-          sel.insertText(niqqud, Word.InsertLocation.replace);
-          await context.sync();
+
+          // ----- ניקוד קטע יחיד (נטול-הערות) תוך שמירה על עיצוב מקומי כמו כתב מודגש -----
+          async function nikudSegment(seg) {
+            seg.load("text");
+            await context.sync();
+            const src = seg.text || "";
+            if (!src.trim()) return;
+            const niqqud = await callDictaNakdan(src, genre);
+            // קטע בפסקה אחת: מחליפים מילה-מילה כדי לשמר עיצוב מקומי (מודגש/נטוי וכו').
+            // הרווחים וסימני ההפניה יושבים בין המילים ולכן לא נוגעים בהם.
+            if (!/[\r\n\f]/.test(src)) {
+              const wr = seg.getTextRanges([" "], true);
+              wr.load("items");
+              await context.sync();
+              const ranges = wr.items || [];
+              const tokens = niqqud.split(" ").filter(function (t) { return t.length; });
+              if (ranges.length && ranges.length === tokens.length) {
+                for (let i = ranges.length - 1; i >= 0; i--) {
+                  ranges[i].insertText(tokens[i], Word.InsertLocation.replace);
+                }
+                await context.sync();
+                return;
+              }
+            }
+            // גיבוי: החלפת הקטע כולו. ההערות עדיין מוגנות (הקטע נטול-הערות),
+            // אך בריבוי פסקאות ייתכן איבוד עיצוב מקומי.
+            seg.insertText(niqqud, Word.InsertLocation.replace);
+            await context.sync();
+          }
+
+          // ----- איסוף סימני ההפניה של הערות שוליים + הערות סיום שבתוך הבחירה -----
+          let footRefs = [], endRefs = [];
+          try {
+            const fns = sel.footnotes; fns.load("items");
+            sel.load("text");
+            await context.sync();
+            (fns.items || []).forEach(function (n) { footRefs.push(n.reference); });
+          } catch (e1) { try { sel.load("text"); await context.sync(); } catch (_) {} }
+          try {
+            const ens = sel.endnotes; ens.load("items");
+            await context.sync();
+            (ens.items || []).forEach(function (n) { endRefs.push(n.reference); });
+          } catch (e2) { /* אין תמיכה בהערות סיום בגרסת ה-API – ממשיכים */ }
+
+          // מיזוג שתי הרשימות (כל אחת בסדר מסמך) לרשימה ממויינת אחת לפי מיקום
+          const noteRefs = [];
+          let fi = 0, ei = 0;
+          while (fi < footRefs.length && ei < endRefs.length) {
+            const cmp = footRefs[fi].compareLocationWith(endRefs[ei]);
+            await context.sync();
+            const v = (cmp.value || "").toLowerCase();
+            if (v === "after" || v === "adjacentafter") { noteRefs.push(endRefs[ei++]); }
+            else { noteRefs.push(footRefs[fi++]); }
+          }
+          while (fi < footRefs.length) noteRefs.push(footRefs[fi++]);
+          while (ei < endRefs.length) noteRefs.push(endRefs[ei++]);
+          noteCount = noteRefs.length;
+
+          // אין הערות – מנקדים את כל הבחירה כקטע אחד
+          if (!noteRefs.length) {
+            await nikudSegment(sel);
+            return;
+          }
+
+          // בניית קטעי טקסט שבין סימני ההפניה (הסימנים עצמם לעולם לא בתוך קטע)
+          const selStart = sel.getRange(Word.RangeLocation.start);
+          const selEnd = sel.getRange(Word.RangeLocation.end);
+          const segs = [];
+          segs.push(selStart.expandTo(noteRefs[0].getRange(Word.RangeLocation.start)));
+          for (let k = 0; k < noteRefs.length - 1; k++) {
+            segs.push(noteRefs[k].getRange(Word.RangeLocation.end)
+                        .expandTo(noteRefs[k + 1].getRange(Word.RangeLocation.start)));
+          }
+          segs.push(noteRefs[noteRefs.length - 1].getRange(Word.RangeLocation.end).expandTo(selEnd));
+
+          // עיבוד מהסוף להתחלה, כדי שמיקומי הקטעים הקודמים לא יזוזו עקב העריכה
+          for (let s = segs.length - 1; s >= 0; s--) {
+            await nikudSegment(segs[s]);
+          }
         });
-        setStatus("dictaStatus", "הניקוד הוחזר למסמך ✓", "ok");
+        setStatus("dictaStatus", "הניקוד הוחזר למסמך ✓ (נשמרו " + noteCount + " הערות)", "ok");
       } catch (e) {
         setStatus("dictaStatus", "החיבור האוטומטי נכשל. פותח את נקדן פרו בחלון – העתק/הדבק שם. (" + e.message + ")", "err");
         try {
